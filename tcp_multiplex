@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+
+function v_echo {
+	if [[ "$verbose" -ne 0 ]]; then
+		echo -e $@
+	fi
+}
+function show_usage {
+	echo "Usage: $0 [-vha] <server metaport> <server dataport> <client port>"
+}
+function show_help {
+	echo "$0 [-vha] <server metaport> <server dataport> <client port>"
+	echo "  <server metaport>  Port from which the server will receive metadata"
+	echo "  <server dataport>  Port to which the server will connect data lines"
+	echo "  <client port>      Port to which the clients will connect"
+	echo "Options:"
+	echo "  -v        Verbose output"
+	echo "  -h        Display this message"
+	echo "  -a        Anonymise clients"
+}
+function parse_opts {
+	while getopts "vha" opt; do
+		case $opt in
+			h) show_help; exit ;;
+			v) export verbose=1 ;;
+			a) anonymise=1 ;;
+			\?) show_usage; exit 1 ;;
+		esac
+	done
+
+	shift $((OPTIND - 1))
+	if [[ $# -lt 3 ]]; then
+		show_usage
+		exit 1
+	fi
+
+	server_metaport="$1"
+	server_dataport="$2"
+	client_port="$3"
+}
+function shutdown {
+	for pid in "${a_p[@]}"; do 
+		kill "$pid" 2>/dev/null; 
+	done; 
+	for pid in "${a_c[@]}"; do 
+		kill "$pid" 2>/dev/null; 
+	done; 
+	kill $(jobs -p | tr "\n" " ") 2>/dev/null;
+	exit
+}
+function client_anonymise {
+	declare -n l_addr="$1"
+	if [[ "$anonymise" -eq 0 ]]; then
+		return
+	else
+		l_addr="$2-RANDOM-$RANDOM"
+	fi
+}
+function client_attach {
+	v_echo "[$3] $1 $2"
+	a_p["$2"]="$3"
+	a_i["$2"]="$4"
+	a_o["$2"]="$5"
+}
+function server_attach {
+	v_echo "[$3] $1 $2"
+	a_c["$2"]="$3"
+	echo "${a_p["$2"]} ${a_o["$2"]} ${a_i["$2"]}" >"/proc/$3/fd/$4"
+	unset a_o["$2"]
+	unset a_i["$2"]
+}
+function client_detach {
+	v_echo "[${a_p["$2"]}] $1 $2"
+	kill "${a_c["$2"]}" 2>/dev/null
+	unset a_p["$2"]
+	unset a_c["$2"]
+}
+function server_detach {
+	v_echo "[${a_p["$2"]}] $1 $2"
+	kill "${a_p["$2"]}" 2>/dev/null
+	unset a_p["$2"]
+	unset a_c["$2"]
+}
+
+export multicall="${multicall:-SERVER}"
+
+case $multicall in
+	SERVER)
+		export IFS=" "
+		export socket="${TMPDIR:-/tmp}/tcp_proxy.$$"
+		export pid=$$
+		export verbose=0
+		export anonymise=0
+
+		#Parse options
+		parse_opts $@
+
+		#Set traps for server shutdown
+		trap 'shutdown' SIGTERM SIGINT SIGABRT
+
+		#Initiate sockets
+		v_echo "Listening for server meta at '$server_metaport'"
+		v_echo "Listening for server lines at '$server_dataport'"
+		v_echo "Listening for client lines at '$client_port'"
+		v_echo "Internal communication at '$socket'"
+		coproc pc_tcp { socat TCP-LISTEN:"$server_metaport",reuseaddr STDIO; }
+		coproc pc_unix { socat -u UNIX-RECV:$socket STDOUT; }
+		export multicall=LINE; #Set type to "LINE", for server lines to have
+		socat TCP-LISTEN:"$server_dataport",fork,reuseaddr EXEC:"$0" &
+		export multicall=CLIENT; #Set type to "CLIENT", for clients to have
+		socat TCP-LISTEN:"$client_port",fork,reuseaddr EXEC:"$0" &
+
+		#Extract line FDs
+		exec {ln_ii}<&${pc_unix[0]}- {ln_pi}<&${pc_tcp[0]}- {ln_po}>&${pc_tcp[1]}- {pc_unix[1]}>&-
+		v_echo "FDs are: Server IN - $ln_pi, Server OUT - $ln_po, UNIX IN - $ln_ii"
+
+		declare -A a_o a_i a_p a_c
+		
+		while true; do
+			#Wait for child commands
+			if read -r -u $ln_ii -t 0.1 s_cmd s_pid s_addr ln_si ln_so; then
+				case $s_cmd in
+					TERM-CLIENT) #Received a command to detach a client line
+						[[ "${a_p["$s_addr"]}" == "$s_pid" ]] && client_detach "Client line closed at" "$s_addr" ;;
+					TERM-SERVER) #Received a command to detach a server line
+						[[ "${a_c["$s_addr"]}" == "$s_pid" ]] && server_detach "Server line closed at" "$s_addr" ;;
+					LINK-CLIENT) #Received a command to attach a client line
+						client_attach "Connecting a client line" "$s_addr" "$s_pid" "$ln_si" "$ln_so"
+						echo "$s_addr" >&$ln_po #Order the server meta to connect
+						;;
+					LINK-SERVER) #Received a command to attach a server line
+						if [[ ! -v a_p["$s_addr"] || -v a_c["$s_addr"] ]]; then
+							kill "$s_pid" 2>/dev/null #The connection is already established, or doesn't exist
+						else #Permit the connection
+							server_attach "Connecting a server line" "$s_addr" "$s_pid" "$ln_si"
+						fi
+						;;
+				esac
+			fi
+
+			#Check server meta integrity
+			read -r -u "$ln_pi" -t 0.001
+			s_code=$?
+			if [[ "$s_code" -eq 1 ]]; then
+				v_echo "Server disconnected, exiting"
+				shutdown
+			fi
+		done
+		;;
+	LINE)
+		exec {ln_ii}<> <(:) #Create input pipe for master meta
+
+		read -r s_addr #Read address from server line
+
+		#Set trap for socket shutdown
+		trap 'kill "$bg_cat1" "$bg_cat2" 2>/dev/null; socat STDIN UNIX-SENDTO:$socket <<< "TERM-SERVER $$ $s_addr"; exit' SIGTERM SIGINT
+
+		#Notify the master that we're ready to connect
+		socat STDIN UNIX-SENDTO:$socket <<<"LINK-SERVER $$ $s_addr $ln_ii"
+
+		read -r -u "$ln_ii" s_pid ln_si ln_so #Get metadata from master
+		exec {ln_ii}>&- #No longer need this line
+
+		#Exchange data
+		cat <"/proc/$s_pid/fd/$ln_si" >&1 &
+		bg_cat1=$!
+		cat >"/proc/$s_pid/fd/$ln_so" <&0 &
+		bg_cat2=$!
+		while true; do
+			sleep 1;
+		done
+		;;
+	CLIENT)
+		exec {ln_si}<> <(:) #Create input pipe for from-server line
+		exec {ln_so}<> <(:) #Create output pipe for to-server line
+
+		s_addr="$SOCAT_PEERADDR:$SOCAT_PEERPORT"
+		client_anonymise s_addr "$$"
+
+		#Set trap for socket shutdown
+		trap 'kill "$bg_cat1" "$bg_cat2" 2>/dev/null; socat STDIN UNIX-SENDTO:$socket <<< "TERM-CLIENT $$ $s_addr"; exit' SIGTERM SIGINT
+
+		#Notify the master that we're ready to connect
+		socat STDIN UNIX-SENDTO:$socket <<<"LINK-CLIENT $$ $s_addr $ln_si $ln_so"
+
+		#Exchange data
+		cat <&$ln_si >&1 &
+		bg_cat1=$!
+		cat >&$ln_so <&0 &
+		bg_cat2=$!
+		while true; do
+			sleep 1;
+		done
+		;;
+esac
+
