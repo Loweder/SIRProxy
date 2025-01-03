@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+
+function v_echo {
+	if [[ "$verbose" -ne 0 ]]; then
+		echo -e $@
+	fi
+}
+function show_usage {
+	echo "Usage: $0 [-vh] [-t <sec>] <server host> <server port> <proxy host> <proxy port>"
+}
+function show_help {
+	echo "$0 [-vh] [-t <sec>] <server host> <server port> <proxy host> <proxy port>"
+	echo "  <server host>  Host of the target server"
+	echo "  <server port>  Port of the target server"
+	echo "  <proxy host>   Host of the external proxy"
+	echo "  <proxy port>   Port of the external proxy"
+	echo "Options:"
+	echo "  -v        Verbose output"
+	echo "  -h        Display this message"
+	echo "  -t <sec>  Set timeout on the connections"
+}
+function parse_opts {
+	while getopts "vht:" opt; do
+		case $opt in
+			h) show_help; exit ;;
+			v) verbose=1 ;;
+			t) timeout="$OPTARG" ;;
+			\?) show_usage; exit 1 ;;
+		esac
+	done
+
+	shift $((OPTIND - 1))
+	if [[ $# -lt 4 ]]; then
+		show_usage
+		exit 1
+	fi
+
+	server_host="$1"
+	server_port="$2"
+	proxy_host="$3"
+	proxy_port="$4"
+}
+function shutdown {
+	kill $(jobs -p | tr "\n" " ") 2>/dev/null
+	exit
+}
+function client_attach {
+	a_p["$1"]="$2"
+	exec {a_i["$1"]}<&$3- {a_o["$1"]}>&$4-
+	v_echo "[$2] FDs are: Server IN - ${a_i["$1"]}, Server OUT - ${a_o["$1"]}"
+}
+function client_detach {
+	v_echo "[${a_p["$2"]}] $1 $2"
+	kill "${a_p["$2"]}" 2>/dev/null
+	unset a_p["$2"]
+	unset a_i["$2"]
+	unset a_o["$2"]
+}
+
+export IFS=" "
+verbose=0
+timeout=5
+
+#Parse options
+parse_opts $@
+
+#Set traps for server shutdown
+trap 'shutdown' SIGTERM SIGINT SIGABRT
+
+#Initiate sockets
+v_echo "Connecting to proxy at '$proxy_host:$proxy_port'"
+coproc pc_tcp { socat STDIO TCP:"$proxy_host":"$proxy_port"; }
+
+#Extract line FDs
+exec {ln_pi}<&${pc_tcp[0]}- {ln_po}>&${pc_tcp[1]}-
+v_echo "FDs are: Proxy IN - $ln_pi, Proxy OUT - $ln_po"
+
+declare -A a_o a_i a_p
+
+while true; do
+	#Wait for replies
+	for s_addr in "${!a_p[@]}"; do
+		if [[ ! -d "/proc/${a_p["$s_addr"]}" ]]; then
+			client_detach "Server timed out at" "$s_addr"
+		else
+			s_data="$(dd status=none iflag=nonblock <&${a_i["$s_addr"]} 2>/dev/null | xxd -p -c 0)"
+			if [[ -n "$s_data" ]]; then
+				s_size="$(( ${#s_data} / 2 ))"
+				v_echo "[${a_p["$s_addr"]}] Got data to proxy: UUID - '$s_addr', Size - $s_size"
+				echo "$s_addr $s_size" >&$ln_po
+				echo "$s_data" | xxd -r -p >&$ln_po
+			fi
+		fi
+	done
+
+	#Wait for connections
+	read -u $ln_pi -t 0.1 s_addr s_size
+	s_code=$?
+	if [[ $s_code -eq 0 ]]; then
+		if [[ ! -v a_p["$s_addr"] || ! -d "/proc/${a_p["$s_addr"]}" ]]; then
+			v_echo "Connecting to server at '$server_host:$server_port'"
+			coproc so_proc { socat -T "$timeout" STDIO UDP-SENDTO:"$server_host":"$server_port"; }
+			client_attach "$s_addr" "$!" "${so_proc[0]}" "${so_proc[1]}"
+			unset so_proc
+		fi
+
+		v_echo "[${a_p["$s_addr"]}] Got data from proxy: UUID - '$s_addr', Size - $s_size"
+		dd bs="$s_size" count=1 <&$ln_pi >&${a_o["$s_addr"]} 2>/dev/null
+	elif [[ $s_code -eq 1 ]]; then
+		v_echo "Proxy disconnected, exiting"
+		shutdown
+	fi
+done

@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+
+function v_echo {
+	if [[ "$verbose" -ne 0 ]]; then
+		echo -e $@
+	fi
+}
+function show_usage {
+	echo "Usage: $0 [-vha] [-t <sec>] <server port> <client port>"
+}
+function show_help {
+	echo "$0 [-vha] [-t <sec>] <server port> <client port>"
+	echo "  <server port>  Port to which the server will connect"
+	echo "  <client port>  Port to which the clients will connect"
+	echo "Options:"
+	echo "  -v        Verbose output"
+	echo "  -h        Display this message"
+	echo "  -a        Anonymise clients"
+	echo "  -t <sec>  Set timeout on the connections"
+}
+function parse_opts {
+	while getopts "vhat:" opt; do
+		case $opt in
+			h) show_help; exit ;;
+			v) export verbose=1 ;;
+			a) anonymise=1 ;;
+			t) timeout="$OPTARG" ;;
+			\?) show_usage; exit 1 ;;
+		esac
+	done
+
+	shift $((OPTIND - 1))
+	if [[ $# -lt 2 ]]; then
+		show_usage
+		exit 1
+	fi
+
+	server_port="$1"
+	client_port="$2"
+}
+function shutdown {
+	for pid in "${a_p[@]}"; do 
+		kill "$pid" 2>/dev/null; 
+	done; 
+	kill $(jobs -p | tr "\n" " ") 2>/dev/null;
+	exit
+}
+function client_anonymise {
+	declare -n l_addr="$1"
+	if [[ "$anonymise" -eq 0 ]]; then
+		return
+	elif [[ ! -v a_h["$l_addr"] && "$3" -eq 1 ]]; then
+		local anon_addr="$2-RANDOM-$RANDOM"
+		a_h["$l_addr"]="$anon_addr"
+		a_h["$anon_addr"]="$l_addr"
+		l_addr="$anon_addr";
+	else
+		l_addr="${a_h["$l_addr"]:-$l_addr}"
+	fi
+}
+function client_attach {
+	a_p["$1"]="$2"
+	exec {a_o["$1"]}>"/proc/$2/fd/$3"
+	v_echo "[$2] FD is: Client OUT - ${a_o["$1"]}"
+}
+function client_detach {
+	v_echo "[${a_p["$2"]}] $1 $2"
+	kill "${a_p["$2"]}" 2>/dev/null
+	exec {a_o["$2"]}<&-
+	unset a_p["$2"]
+	unset a_o["$2"]
+	if [[ "$3" -ne 0 ]]; then
+		local deanon_addr="${a_h["$2"]}"
+		unset a_h["$deanon_addr"]
+		unset a_h["$2"]
+	fi
+}
+
+export multicall="${multicall:-SERVER}"
+
+case $multicall in
+	SERVER)
+		export IFS=" "
+		export socket="${TMPDIR:-/tmp}/udp_proxy.$$"
+		export pid=$$
+		export verbose=0
+		anonymise=0
+		timeout=5
+
+		#Parse options
+		parse_opts $@
+
+		#Set traps for server shutdown
+		trap 'shutdown' SIGTERM SIGINT SIGABRT
+
+		#Initiate sockets
+		v_echo "Listening for server at '$server_port'"
+		v_echo "Listening for clients at '$client_port'"
+		v_echo "Internal communication at '$socket'"
+		export multicall=CLIENT; #Set type to "CLIENT", for clients to have
+		coproc pc_tcp { socat TCP-LISTEN:"$server_port",reuseaddr STDIO; }
+		coproc pc_unix { socat -u UNIX-RECV:$socket STDOUT; }
+		socat -t "$timeout" UDP-RECVFROM:"$client_port",fork,reuseaddr EXEC:"$0" &
+
+		#Extract line FDs
+		exec {ln_ii}<&${pc_unix[0]}- {ln_pi}<&${pc_tcp[0]}- {ln_po}>&${pc_tcp[1]}- {pc_unix[1]}>&-
+		v_echo "FDs are: Server IN - $ln_pi, Server OUT - $ln_po, UNIX IN - $ln_ii"
+
+		declare -A a_o a_p a_h
+		
+		while true; do
+			#Wait for client commands
+			if read -u $ln_ii -t 0.1 s_cmd s_pid s_addr ln_si ln_so; then
+				case $s_cmd in
+					TERM) #Received a command to detach a client
+						client_anonymise s_addr "$s_pid" 0
+						[[ "${a_p["$s_addr"]}" == "$s_pid" ]] && client_detach "Client timed out at" "$s_addr" 1 ;;
+					LINK) #Received a command to attach a client
+						client_anonymise s_addr "$s_pid" 1
+						v_echo "Connecting a client"
+						[[ -v a_p["$s_addr"] ]] && client_detach "Detaching client from" "$s_addr" 0
+						client_attach "$s_addr" "$s_pid" "$ln_si"
+
+						#Proxy initial data in format "<address> <size>\n<datagram>"
+						s_data="$(xxd -p -c 0 <"/proc/$s_pid/fd/$ln_so")"
+						s_size="$(( ${#s_data} / 2 ))"
+						v_echo "[$s_pid] Got data to server: UUID - '$s_addr', Size - $s_size"
+						echo "$s_addr $s_size" >&$ln_po
+						echo "$s_data" | xxd -r -p >&$ln_po
+						;;
+				esac
+			fi
+
+			#Wait for responses
+			read -u $ln_pi -t 0.1 s_addr s_size
+			s_code=$?
+			if [[ $s_code -eq 0 ]]; then
+				v_echo "[${a_p["$s_addr"]}] Got data from server: UUID - '$s_addr', Size - $s_size"
+				if [[ -v a_p["$s_addr"] ]]; then
+					dd bs="$s_size" count=1 <&$ln_pi >&${a_o["$s_addr"]} 2>/dev/null #Can respond, send
+				else
+					dd bs="$s_size" count=1 <&$ln_pi &>/dev/null #Can't respond, dispose
+				fi
+			elif [[ $s_code -eq 1 ]]; then
+				v_echo "Server disconnected, exiting"
+				shutdown
+			fi
+		done
+		;;
+	CLIENT)
+		exec {ln_si}<> <(:) #Create input pipe for from-server line
+		exec {ln_so}<> <(:) #Create output pipe for to-server line
+
+		#Set trap for socket shutdown
+		trap 'kill "$bg_cat" 2>/dev/null; socat STDIN UNIX-SENDTO:$socket <<< "TERM $$ $SOCAT_PEERADDR:$SOCAT_PEERPORT"; exit' SIGTERM SIGINT
+
+		#Notify the master that we're ready to connect, and send initial data
+		cat >&$ln_so
+		socat STDIN UNIX-SENDTO:$socket <<<"LINK $$ $SOCAT_PEERADDR:$SOCAT_PEERPORT $ln_si $ln_so"
+		exec {ln_so}>&-
+		
+		#Exchange data
+		cat <&$ln_si &
+		bg_cat=$!
+		while true; do
+			sleep 1;
+		done
+		;;
+esac
+
