@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+
+#Those variables are used internally for option parsing
+declare -a com_params=() com_flags=() com_options=()
+declare -A com_data=()
+declare com_maxopt=0 com_maxpar=0
+
+#"Verbose" echo: only echo on "-v"
+function v_echo {
+	if [[ "$com_verbose" -ne 0 ]]; then
+		echo -e $@
+	fi
+}
+
+#Show usage on invalid syntax
+function show_usage {
+	echo -n "Usage: $0 "
+
+	#Display flags as "[-abc]"
+	echo -n "[-$(IFS=; echo "${com_flags[*]}")] "
+
+	#Display options as "[-a <arg>] [-b <arg>]"
+	for name in "${com_options[@]}"; do
+		echo -n "[-$name <${com_data["$name-arg"]}>] "
+	done
+
+	#Display positional arguments as "<arg1> <arg2>"
+	for name in "${com_params[@]}"; do
+		echo -n "<$name> "
+	done
+	echo ""
+}
+
+#Show help on "-h"
+function show_help {
+	echo -n "$0 "
+
+	#Display flags as "[-abc]"
+	echo -n "[-$(IFS=; echo "${com_flags[*]}")] "
+
+	#Display options as "[-a <arg>] [-b <arg>]"
+	for name in "${com_options[@]}"; do
+		echo -n "[-$name <${com_data["$name-arg"]}>] "
+	done
+
+	#Display positional arguments as "<arg1> <arg2>"
+	for name in "${com_params[@]}"; do
+		echo -n "<$name> "
+	done
+	echo ""
+
+	#Display positional arguments as "  <arg> Description"
+	for name in "${com_params[@]}"; do
+		printf "  %-$(( com_maxpar + 2 ))s  %s\n" "<$name>" "${com_data["$name"]}"
+	done
+
+	echo "Options:"
+
+	#Display flags as "  -a Description"
+	for name in "${com_flags[@]}"; do
+		printf "  -%-$(( com_maxopt + 4 ))s  %s\n" "$name" "${com_data["$name-desc"]}"
+	done
+
+	#Display options as "  -a <arg> Description"
+	for name in "${com_options[@]}"; do
+		printf "  -%-$(( com_maxopt + 4 ))s  %s\n" "$name <${com_data["$name-arg"]}>" "${com_data["$name-desc"]}"
+	done
+}
+
+#Parse arguments
+function parse_opts {
+	local opts=""
+	opts+="$(IFS=; echo "${com_flags[*]}")"
+	opts+="$(IFS=":"; echo "${com_options:+"${com_options[*]}:"}")"
+
+	#Iterate over each option
+	while getopts "$opts" name; do
+		local var="${com_data["$name-var"]}"
+		if [[ -n "$var" ]]; then
+			local -n ref="$var"
+			[[ -n "${com_data["$name-arg"]}" ]] && ref="$OPTARG" || ref=1
+		else
+			show_usage
+			exit 1
+		fi
+	done
+
+	if [[ $com_help == 1 ]]; then
+		show_help
+		exit
+	fi
+
+	#Prepare for parsing positional arguments
+	shift $((OPTIND - 1))
+	if [[ $# -lt ${#com_params[@]} ]]; then
+		echo "$0: ${#com_params[@]} positional arguments required"
+		show_usage
+		exit 1
+	fi
+
+	for ((i = 0; i < $#; i++)); do
+		local j=$((i + 1))
+		local -n ref="${com_params[$i]}"
+		ref="${!j}"
+	done
+
+	if [[ $com_trace == 1 ]]; then
+		set -x
+	fi
+}
+
+# Add an option/flag
+# 4 arguments if flag, 5 otherwise
+# Arguments:
+#   10-1f: Name
+#   2o-2f: Variable
+#   3o-#f: Value name
+#   4o-3f: Default value
+#   5o-4f: Description
+function add_opt {
+	if (( $# <= 4 )); then
+		com_flags+=("$1")
+		com_data["$1-var"]="$2"
+		com_data["$1-desc"]="$4"
+		declare -xg "$2=$3"
+	else
+		com_options+=("$1")
+		com_data["$1-var"]="$2"
+		com_data["$1-arg"]="$3"
+		com_data["$1-desc"]="$5"
+		declare -xg "$2=$4"
+		(( ${#3} > com_maxopt )) && com_maxopt=${#3}
+	fi
+}
+
+#Add a positional argument
+# Arguments:
+#   1: Name
+#   2: Variable
+function add_param {
+	com_params+=("$1")
+	com_data["$1"]="$2"
+	declare -xg "$1"
+	(( ${#1} > com_maxpar )) && com_maxpar=${#1}
+}
+
+#Add default options
+add_opt "v" "com_verbose" 0 "Verbose output (debugging)"
+add_opt "t" "com_trace" 0 "Trace all commands executed (debugging)"
+add_opt "h" "com_help" 0 "Display this message"
+
+# Start a background "socat"
+# Assumes a multicall script
+# Arguments:
+#   1: Message
+#   2: Connection type
+#   3: Connection address
+#   4: Connection options
+#   5+: Direct "socat" options
+function connect {
+	v_echo "$1 $3"
+	socat "${@:5}" "$2:$3$4" EXEC:"$0" &
+}
+
+#Start a background "socat", while exporting file descriptors
+# Arguments:
+#   1: Message
+#   2: Connection type
+#   3: Connection address
+#   4: Connection options
+#   5: Name for input FD
+#   6: Name for output FD
+#   7+: Direct "socat" options
+function connect_coproc {
+	v_echo "$1 $3"
+	local -n in="$5" out="$6"
+	coproc com_proc { socat "${@:7}" "$2:$3$4" STDIO; }
+	exec {in}<&${com_proc[0]}- {out}>&${com_proc[1]}-
+	v_echo "FDs are: Input - $in. Output - $out"
+	unset com_proc
+}
+
+#Wait for all subprocesses to exit, and exit
+function exit_wait {
+	wait $(jobs -p | tr "\n" " ") 2>/dev/null
+	exit
+}
+
+#Kill all subprocesses, and exit
+function exit_kill {
+	kill $(jobs -p | tr "\n" " ") 2>/dev/null
+	exit
+}
+
+#Kill all subprocesses, including ones in a list, and exit
+function exit_kill_server {
+	local -n ref="$1"
+	for pid in "${ref[@]}"; do 
+		kill "$pid" 2>/dev/null; 
+	done; 
+	kill $(jobs -p | tr "\n" " ") 2>/dev/null
+	exit
+}
