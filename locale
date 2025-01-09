@@ -210,3 +210,4 @@ function exit_kill_server {
 	kill $(jobs -p | tr "\n" " ") 2>/dev/null
 	exit
 }
+

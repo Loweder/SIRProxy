@@ -1,21 +1,32 @@
-#!/usr/bin/env bash
-
-source "./locale"
-
+# Associate an anonymous UUID with the client
+# Arguments:
+#   1: Old ID
+#   2: Client line PID
 function client_anonymise {
 	declare -n l_addr="$1"
-	if [[ "$anonymise" -eq 0 ]]; then
-		return
-	else
-		l_addr="$2-RANDOM-$RANDOM"
-	fi
+	[[ "$anonymise" -gt 0 ]] && l_addr="$2-RANDOM-$RANDOM"
 }
+
+# Attach a client line
+# Arguments
+#   1: Message
+#   2: Address
+#   3: Client line PID
+#   4: Client read FD
+#   5: Client write FD
 function client_attach {
 	v_echo "[$3] $1 $2"
 	a_p["$2"]="$3"
 	a_i["$2"]="$4"
 	a_o["$2"]="$5"
 }
+
+# Attach a server line
+# Arguments
+#   1: Message
+#   2: Address
+#   3: Server line PID
+#   4: Server write FD
 function server_attach {
 	v_echo "[$3] $1 $2"
 	a_c["$2"]="$3"
@@ -23,6 +34,11 @@ function server_attach {
 	unset a_o["$2"]
 	unset a_i["$2"]
 }
+
+# Detach a client line
+# Arguments
+#   1: Message
+#   2: Address
 function client_detach {
 	v_echo "[${a_p["$2"]}] $1 $2"
 	kill "${a_c["$2"]}" 2>/dev/null
@@ -31,6 +47,11 @@ function client_detach {
 	unset a_i["$2"]
 	unset a_o["$2"]
 }
+
+# Detach a server line
+# Arguments
+#   1: Message
+#   2: Address
 function server_detach {
 	v_echo "[${a_p["$2"]}] $1 $2"
 	kill "${a_p["$2"]}" 2>/dev/null

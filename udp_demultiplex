@@ -1,7 +1,3 @@
-#!/usr/bin/env bash
-
-source "./locale"
-
 # Receive data from server
 # Arguments
 #   1: Address

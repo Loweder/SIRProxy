@@ -1,7 +1,3 @@
-#!/usr/bin/env bash
-
-source "./locale"
-
 export IFS=" "
 add_param "server_host" "Host of the target server"
 add_param "server_port" "Port of the target server"
