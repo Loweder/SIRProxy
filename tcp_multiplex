@@ -1,53 +1,7 @@
 #!/usr/bin/env bash
 
-function v_echo {
-	if [[ "$verbose" -ne 0 ]]; then
-		echo -e $@
-	fi
-}
-function show_usage {
-	echo "Usage: $0 [-vha] <server metaport> <server dataport> <client port>"
-}
-function show_help {
-	echo "$0 [-vha] <server metaport> <server dataport> <client port>"
-	echo "  <server metaport>  Port from which the server will receive metadata"
-	echo "  <server dataport>  Port to which the server will connect data lines"
-	echo "  <client port>      Port to which the clients will connect"
-	echo "Options:"
-	echo "  -v        Verbose output"
-	echo "  -h        Display this message"
-	echo "  -a        Anonymise clients"
-}
-function parse_opts {
-	while getopts "vha" opt; do
-		case $opt in
-			h) show_help; exit ;;
-			v) export verbose=1 ;;
-			a) anonymise=1 ;;
-			\?) show_usage; exit 1 ;;
-		esac
-	done
+source "./locale"
 
-	shift $((OPTIND - 1))
-	if [[ $# -lt 3 ]]; then
-		show_usage
-		exit 1
-	fi
-
-	server_metaport="$1"
-	server_dataport="$2"
-	client_port="$3"
-}
-function shutdown {
-	for pid in "${a_p[@]}"; do 
-		kill "$pid" 2>/dev/null; 
-	done; 
-	for pid in "${a_c[@]}"; do 
-		kill "$pid" 2>/dev/null; 
-	done; 
-	kill $(jobs -p | tr "\n" " ") 2>/dev/null;
-	exit
-}
 function client_anonymise {
 	declare -n l_addr="$1"
 	if [[ "$anonymise" -eq 0 ]]; then
@@ -74,6 +28,8 @@ function client_detach {
 	kill "${a_c["$2"]}" 2>/dev/null
 	unset a_p["$2"]
 	unset a_c["$2"]
+	unset a_i["$2"]
+	unset a_o["$2"]
 }
 function server_detach {
 	v_echo "[${a_p["$2"]}] $1 $2"
@@ -88,31 +44,22 @@ case $multicall in
 	SERVER)
 		export IFS=" "
 		export socket="${TMPDIR:-/tmp}/tcp_proxy.$$"
-		export pid=$$
-		export verbose=0
-		export anonymise=0
-
-		#Parse options
+		add_param "server_metaport" "Port from which the server will receive metadata"
+		add_param "server_dataport" "Port to which the server will connect data lines"
+		add_param "client_port" "Port to which the clients will connect"
+		add_opt "a" "anonymise" 0 "Anonymise clients"
 		parse_opts $@
 
-		#Set traps for server shutdown
-		trap 'shutdown' SIGTERM SIGINT SIGABRT
+		#Set trap for shutdown
+		trap 'exit_kill_server a_p a_c' SIGTERM SIGINT SIGABRT
 
 		#Initiate sockets
-		v_echo "Listening for server meta at '$server_metaport'"
-		v_echo "Listening for server lines at '$server_dataport'"
-		v_echo "Listening for client lines at '$client_port'"
-		v_echo "Internal communication at '$socket'"
-		coproc pc_tcp { socat TCP-LISTEN:"$server_metaport",reuseaddr STDIO; }
-		coproc pc_unix { socat -u UNIX-RECV:$socket STDOUT; }
+		connect_coproc "Listening for server meta at" "TCP-LISTEN" "$server_metaport" ",reuseaddr" ln_pi ln_po
+		connect_coproc "Internal communication at" "UNIX-RECV" "$socket" "" ln_ii ln_io "-u"
 		export multicall=LINE; #Set type to "LINE", for server lines to have
-		socat TCP-LISTEN:"$server_dataport",fork,reuseaddr EXEC:"$0" &
+		connect "Listening for server lines at" "TCP-LISTEN" "$server_dataport" ",reuseaddr,fork"
 		export multicall=CLIENT; #Set type to "CLIENT", for clients to have
-		socat TCP-LISTEN:"$client_port",fork,reuseaddr EXEC:"$0" &
-
-		#Extract line FDs
-		exec {ln_ii}<&${pc_unix[0]}- {ln_pi}<&${pc_tcp[0]}- {ln_po}>&${pc_tcp[1]}- {pc_unix[1]}>&-
-		v_echo "FDs are: Server IN - $ln_pi, Server OUT - $ln_po, UNIX IN - $ln_ii"
+		connect "Listening for client lines at" "TCP-LISTEN" "$client_port" ",reuseaddr,fork"
 
 		declare -A a_o a_i a_p a_c
 		
@@ -143,7 +90,7 @@ case $multicall in
 			s_code=$?
 			if [[ "$s_code" -eq 1 ]]; then
 				v_echo "Server disconnected, exiting"
-				shutdown
+				exit_kill_server a_p a_c
 			fi
 		done
 		;;
@@ -152,8 +99,8 @@ case $multicall in
 
 		read -r s_addr #Read address from server line
 
-		#Set trap for socket shutdown
-		trap 'kill "$bg_cat1" "$bg_cat2" 2>/dev/null; socat STDIN UNIX-SENDTO:$socket <<< "TERM-SERVER $$ $s_addr"; exit' SIGTERM SIGINT
+		#Set trap for shutdown
+		trap 'socat STDIN UNIX-SENDTO:$socket <<< "TERM-SERVER $$ $s_addr"; exit_kill' SIGTERM SIGINT SIGABRT
 
 		#Notify the master that we're ready to connect
 		socat STDIN UNIX-SENDTO:$socket <<<"LINK-SERVER $$ $s_addr $ln_ii"
@@ -163,34 +110,27 @@ case $multicall in
 
 		#Exchange data
 		cat <"/proc/$s_pid/fd/$ln_si" >&1 &
-		bg_cat1=$!
 		cat >"/proc/$s_pid/fd/$ln_so" <&0 &
-		bg_cat2=$!
-		while true; do
-			sleep 1;
-		done
+		exit_wait
 		;;
 	CLIENT)
 		exec {ln_si}<> <(:) #Create input pipe for from-server line
 		exec {ln_so}<> <(:) #Create output pipe for to-server line
 
+		#Obtain and anonymise the address
 		s_addr="$SOCAT_PEERADDR:$SOCAT_PEERPORT"
 		client_anonymise s_addr "$$"
 
-		#Set trap for socket shutdown
-		trap 'kill "$bg_cat1" "$bg_cat2" 2>/dev/null; socat STDIN UNIX-SENDTO:$socket <<< "TERM-CLIENT $$ $s_addr"; exit' SIGTERM SIGINT
+		#Set trap for shutdown
+		trap 'socat STDIN UNIX-SENDTO:$socket <<< "TERM-CLIENT $$ $s_addr"; exit_kill' SIGTERM SIGINT SIGABRT
 
 		#Notify the master that we're ready to connect
 		socat STDIN UNIX-SENDTO:$socket <<<"LINK-CLIENT $$ $s_addr $ln_si $ln_so"
 
 		#Exchange data
 		cat <&$ln_si >&1 &
-		bg_cat1=$!
 		cat >&$ln_so <&0 &
-		bg_cat2=$!
-		while true; do
-			sleep 1;
-		done
+		exit_wait
 		;;
 esac
 

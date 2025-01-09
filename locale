@@ -174,15 +174,22 @@ function connect {
 function connect_coproc {
 	v_echo "$1 $3"
 	local -n in="$5" out="$6"
-	coproc com_proc { socat "${@:7}" "$2:$3$4" STDIO; }
-	exec {in}<&${com_proc[0]}- {out}>&${com_proc[1]}-
+	coproc socat "${@:7}" "$2:$3$4" STDIO;
+	exec {in}<&${COPROC[0]}- {out}>&${COPROC[1]}-
 	v_echo "FDs are: Input - $in. Output - $out"
-	unset com_proc
+	unset COPROC
 }
 
 #Wait for all subprocesses to exit, and exit
 function exit_wait {
 	wait $(jobs -p | tr "\n" " ") 2>/dev/null
+	exit
+}
+
+#Wait for any subprocess to exit, kill others and exit
+function exit_wait_killing {
+	wait -n $(jobs -p | tr "\n" " ") 2>/dev/null
+	kill $(jobs -p | tr "\n" " ") 2>/dev/null
 	exit
 }
 
@@ -192,12 +199,14 @@ function exit_kill {
 	exit
 }
 
-#Kill all subprocesses, including ones in a list, and exit
+#Kill all subprocesses, including ones in a lists, and exit
 function exit_kill_server {
-	local -n ref="$1"
-	for pid in "${ref[@]}"; do 
-		kill "$pid" 2>/dev/null; 
-	done; 
+	for name in "$@"; do
+		local -n ref="$name"
+		for pid in "${ref[@]}"; do 
+			kill "$pid" 2>/dev/null; 
+		done; 
+	done
 	kill $(jobs -p | tr "\n" " ") 2>/dev/null
 	exit
 }
