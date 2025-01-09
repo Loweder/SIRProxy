@@ -28,11 +28,11 @@ function transmit_data {
 #   2: Address
 function client_attach {
 	v_echo "$1 $2"
-	coproc so_proc { socat -T "$timeout" STDIO UDP-SENDTO:"$server_host":"$server_port"; }
+	coproc socat -T "$timeout" STDIO UDP-SENDTO:"$server_host":"$server_port";
 	a_p["$2"]="$!"
-	exec {a_i["$2"]}<&${so_proc[0]}- {a_o["$2"]}>&${so_proc[1]}-
+	exec {a_i["$2"]}<&${COPROC[0]}- {a_o["$2"]}>&${COPROC[1]}-
 	v_echo "[${a_p["$2"]}] FDs are: Server IN - ${a_i["$2"]}, Server OUT - ${a_o["$2"]}"
-	unset so_proc
+	unset COPROC
 }
 
 # Detach a client

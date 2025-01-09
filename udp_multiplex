@@ -129,7 +129,7 @@ case $multicall in
 		exec {ln_so}<> <(:) #Create output pipe for to-server line
 
 		#Set trap for shutdown
-		trap 'socat STDIN UNIX-SENDTO:$socket <<< "TERM $$ $SOCAT_PEERADDR:$SOCAT_PEERPORT"; exit_kill' SIGTERM SIGINT
+		trap 'socat STDIN UNIX-SENDTO:$socket <<< "TERM $$ $SOCAT_PEERADDR:$SOCAT_PEERPORT"; exit_kill' SIGTERM SIGINT SIGABRT
 
 		#Notify the master that we're ready to connect, and send initial data
 		cat >&$ln_so <&0
