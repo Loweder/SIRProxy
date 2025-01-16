@@ -1,11 +1,5 @@
 ## SIRProxy - the Server Initiated Reverse Proxy
 
-> # :warning: **NOTE** 
->
-> This branch contains the Bash implementation of the proxy,
-> the "UDP" protocol of which struggles under high load.  
-> Use the Perl implementation instead
-
 ### Why this?
 
 In some cases it is impossible for
@@ -18,12 +12,12 @@ connections to the server
 
 ### Installation
 
-The requirements to run are `Bash version 4.0+` and `socat`
+The requirements to run are `Perl version 5.0+`
 
-All executables here need to be combined with the `locale` file first to create standalone files.  
+All executables here need to be combined with the `locale.pl` file first to create standalone files.  
 To do this run:
 
-> 1. `cat locale 'part name' > 'file name'`
+> 1. `cat locale.pl 'part name' > 'file name'`
 > 2. `chmod 755 'file name'`
 
 After that you may put the resulting file to `$PATH`, or call it by its full name
@@ -33,14 +27,14 @@ After that you may put the resulting file to `$PATH`, or call it by its full nam
 > #### To start the UDP proxy
 >
 > 1. Start the server
-> 2. On the proxy side do `udp_multiplex <server port> <client port>`
-> 3. On the server side do `udp_demultiplex <server host> <server port> <proxy host> <proxy port>`
+> 2. On the proxy side do `udp_multiplex.pl <server port> <client port>`
+> 3. On the server side do `udp_demultiplex.pl <server host> <server port> <proxy host> <proxy port>`
 
 > #### To start the TCP proxy
 >
 > 1. Start the server
-> 2. On the proxy side do `tcp_multiplex <server metaport> <server dataport> <client port>`
-> 3. On the server side do `tcp_demultiplex <server host> <server port> <proxy host> <proxy metaport> <proxy dataport>`
+> 2. On the proxy side do `tcp_multiplex.pl <server metaport> <server dataport> <client port>`
+> 3. On the server side do `tcp_demultiplex.pl <server host> <server port> <proxy host> <proxy metaport> <proxy dataport>`
 
 For advanced options see `<command> -h`
 
