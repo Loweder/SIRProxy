@@ -1,10 +1,10 @@
 #!/usr/bin/env perl
 
-# TODO: Add spaces before all comments, both Bash and here
-
 use strict;
 use warnings;
 use Getopt::Std;
+use IO::Socket qw(:all);
+use IO::Select;
 
 # Those variables are used internally for option parsing
 our (@com_params, @com_flags, @com_options);
@@ -54,20 +54,20 @@ add_opt("h", \our $com_help, 0, "Display this message");
 
 # "Verbose" echo: only echo on "-v"
 sub v_echo {
-  print "$_[0]\n" if $com_verbose;	
+  print "@_\n" if $com_verbose;	
 }
 
 # Show usage on invalid syntax
 sub show_usage {
 	print "Usage: $0 ";
 
-	#Display flags as "[-abc]"
+	# Display flags as "[-abc]"
 	print "[-" . join("", @com_flags) . "] ";
 
-	#Display options as "[-a <arg>] [-b <arg>]"
+	# Display options as "[-a <arg>] [-b <arg>]"
 	print "[-$_ <$com_data{$_ . '-arg'}>] " foreach @com_options;
 
-	#Display positional arguments as "<arg1> <arg2>"
+	# Display positional arguments as "<arg1> <arg2>"
 	print "<$_> " foreach @com_params;
 	print "\n";
 	exit 1;
@@ -77,25 +77,25 @@ sub show_usage {
 sub show_help {
 	print "$0 ";
 
-	#Display flags as "[-abc]"
+	# Display flags as "[-abc]"
 	print "[-" . join("", @com_flags) . "] ";
 
-	#Display options as "[-a <arg>] [-b <arg>]"
+	# Display options as "[-a <arg>] [-b <arg>]"
 	print "[-$_ <$com_data{$_ . '-arg'}>] " foreach @com_options;
 
-	#Display positional arguments as "<arg1> <arg2>"
+	# Display positional arguments as "<arg1> <arg2>"
 	print "<$_> " foreach @com_params;
 	print "\n";
 
-	#Display positional arguments as "  <arg> Description"
+	# Display positional arguments as "  <arg> Description"
 	printf "  %-*s  %s\n", $com_maxpar + 2, "<$_>", $com_data{$_ . '-desc'} foreach @com_params;
 
 	print "Options:\n";
 
-	#Display flags as "  -a Description"
+	# Display flags as "  -a Description"
 	printf "  -%-*s  %s\n", $com_maxopt + 4, $_, $com_data{$_ . '-desc'} foreach @com_flags;
 
-	#Display options as "  -a <arg> Description"
+	# Display options as "  -a <arg> Description"
 	printf "  -%-*s  %s\n", $com_maxopt + 4, "$_ <$com_data{$_ . '-arg'}>", $com_data{$_ . '-desc'} foreach @com_options;
 
 	exit;
@@ -107,11 +107,10 @@ sub parse_opts {
 	$opts .= join("", @com_flags);
 	$opts .= join(":", @com_options) . ":" if @com_options;
 
-	#Parse options
-	my $res = getopts($opts, \my %names);
-	show_usage() unless $res;
+	# Parse options
+	show_usage() unless getopts($opts, \my %names);
 
-	#Iterate over each option
+	# Iterate over each option
 	foreach my $name (keys %names) {
 		${$com_data{$name . '-var'}} = $names{$name};
 		show_usage() unless defined($names{$name});
@@ -119,20 +118,66 @@ sub parse_opts {
 
 	show_help() if $com_help;
 
-	#Prepare for parsing positional arguments
+	# Prepare for parsing positional arguments
 	if (scalar(@ARGV) != scalar(@com_params)) {
 		print "$0: " . scalar(@com_params) . " positional arguments required\n";
 		show_usage();
 	}
 
-	for my $i (0 .. $#ARGV) {
-		${$com_data{$com_params[$i] . '-var'}} = shift @ARGV;
+	for my $param (@com_params) {
+		${$com_data{$param . '-var'}} = shift @ARGV;
 	}
 }
 
-#Close all sockets, and exit
+# Start a binding socket
+# Arguments:
+#   1: Message
+#   2: Connection type
+#   3: Connection port
+#   4: Listening queue
+sub socket_bind {
+	v_echo "$_[0] $_[2]";
+	my @args = (
+		Proto => $_[1],
+		LocalHost => inet_ntoa(INADDR_ANY),
+		LocalPort => $_[2],
+		ReuseAddr => 1,
+	);
+	push @args, (Listen => $_[3]) if scalar(@_) > 3;
+	return (IO::Socket::INET->new(@args) or die "Failed to bind to $_[2]");
+}
+
+# Start a connecting socket
+# Arguments:
+#   1: Message
+#   2: Connection type
+#   3: Connection address
+#   4: Connection port
+sub socket_connect {
+	v_echo "$_[0] $_[2]:$_[3]";
+	return (IO::Socket::INET->new(
+		Proto => $_[1],
+		PeerHost => $_[2],
+		PeerPort => $_[3],
+	) or die "Failed to connect to $_[2]:$_[3]");
+}
+
+# Configure all passed sockets to autoflush/nonblock
+sub socket_adjust {
+	for my $sock (@_) {
+		$sock->autoflush(1);
+		$sock->blocking(0);
+	}
+}
+
+# Close all sockets, and exit
+# Arguments:
+#   1: Message
+#   2+: FDs to close
 sub exit_close {
-	foreach my $sock (@_) {
+	my ($message, @rest) = @_;
+	v_echo($message);
+	foreach my $sock (@rest) {
 		close($sock);
 	}
 	exit;
