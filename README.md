@@ -14,13 +14,9 @@ connections to the server
 
 The requirements to run are `Perl version 5.0+`
 
-All executables here need to be combined with the `locale.pl` file first to create standalone files.  
-To do this run:
-
-> 1. `cat locale.pl 'part name' > 'file name'`
-> 2. `chmod 755 'file name'`
-
-After that you may put the resulting file to `$PATH`, or call it by its full name
+All executables here need to either be combined with the `locale.pl`, or have it in the Current Working Directory when running.  
+To combine them run: `./builder.pl`,
+after that you may add the resulting files from `./build` file to `$PATH`, or call them by their full name
 
 ### Usage
 
